@@ -7,8 +7,7 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from streamlit_autorefresh import st_autorefresh
 
-# --- إعدادات المنطقة الزمنية (هام جداً) ---
-# قم بتغيير الرقم 2 إلى 3 إذا كان فرق التوقيت لديك 3 ساعات
+# --- إعدادات المنطقة الزمنية ---
 HOURS_DIFF = 3 
 
 # --- إعدادات الملفات ---
@@ -39,7 +38,6 @@ def save_data(df, file_path):
 
 # --- دالة التوقيت المحلي ---
 def get_local_time():
-    # يأخذ وقت السيرفر ويضيف له فرق الساعات ليطابق توقيت دولتك
     return datetime.utcnow() + timedelta(hours=HOURS_DIFF)
 
 # --- دالة التجميل ---
@@ -70,23 +68,19 @@ def update_timeout_settings(minutes):
     save_data(df, SETTINGS_FILE)
     get_timeout_minutes_cached.clear()
 
-# --- التسجيل (مع تصحيح الوقت) ---
+# --- التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    
-    # استخدام التوقيت المحلي المصحح
     if specific_time:
         log_time = specific_time
     else:
         log_time = get_local_time()
     
-    # منع التكرار (خلال آخر دقيقة فقط)
     if not df.empty:
         last_entry = df[df["الاسم"] == user].tail(1)
         if not last_entry.empty:
             last_action = last_entry.iloc[0]["نوع الحركة"]
             last_time_str = last_entry.iloc[0]["الوقت"]
-            # إذا كانت نفس الحركة ونفس الدقيقة تقريباً، نمنع التكرار
             if last_action == action and str(log_time.strftime("%H:%M")) in str(last_time_str):
                  if not auto:
                      st.session_state['msg_type'] = 'warning'
@@ -111,7 +105,6 @@ def check_inactivity():
         current_status = st.session_state.get('current_status')
         if last_active:
             timeout = get_timeout_minutes_cached() * 60
-            # استخدام التوقيت المحلي للمقارنة
             if (get_local_time() - last_active).total_seconds() > timeout:
                 if current_status == "منزل":
                     user = st.session_state['username']
@@ -226,15 +219,15 @@ def employee_view(username):
             st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
             
     st.divider()
-    st.caption("أحدث الحركات:")
+    st.caption("سجل الحركات الكامل:")
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if not df.empty:
-        # 1. فلترة على اسم المستخدم
         user_logs = df[df["الاسم"] == username]
-        # 2. عكس الترتيب (الأحدث بالأعلى)
-        user_logs = user_logs.iloc[::-1]
-        # 3. عرض أول 5 صفوف فقط
-        st.dataframe(style_data(user_logs.head(5)), use_container_width=True)
+        user_logs = user_logs.iloc[::-1] # عكس الترتيب (الأحدث في الأعلى)
+        
+        # --- التعديل هنا: إزالة .head(5) ---
+        # الآن سيعرض الجدول بالكامل مهما كان العدد
+        st.dataframe(style_data(user_logs), use_container_width=True)
 
 def admin_view():
     update_activity()
@@ -268,8 +261,7 @@ def admin_view():
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
             
-            # عرض الأحدث في الأعلى للمدير أيضاً
-            df_logs = df_logs.iloc[::-1]
+            df_logs = df_logs.iloc[::-1] # عرض الأحدث في الأعلى للمدير أيضاً
             st.dataframe(style_data(df_logs), use_container_width=True)
         else: st.info("السجل فارغ.")
 
