@@ -7,13 +7,17 @@ import arabic_reshaper
 from bidi.algorithm import get_display
 from streamlit_autorefresh import st_autorefresh
 
+# --- إعدادات المنطقة الزمنية (هام جداً) ---
+# قم بتغيير الرقم 2 إلى 3 إذا كان فرق التوقيت لديك 3 ساعات
+HOURS_DIFF = 3 
+
 # --- إعدادات الملفات ---
 LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
 SETTINGS_FILE = 'settings.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
-st.set_page_config(page_title="نظام الحضور المرئي", layout="centered")
+st.set_page_config(page_title="نظام الحضور", layout="centered")
 
 # تحديث كل 60 ثانية
 count = st_autorefresh(interval=60000, limit=None, key="fizzbuzzcounter")
@@ -31,9 +35,14 @@ def save_data(df, file_path):
     try:
         df.to_csv(file_path, index=False)
     except OSError:
-        st.error("خطأ مؤقت في السيرفر، انتظر لحظة.")
+        st.error("انتظر لحظة.. السيرفر مشغول")
 
-# --- دالة التجميل (ألوان) ---
+# --- دالة التوقيت المحلي ---
+def get_local_time():
+    # يأخذ وقت السيرفر ويضيف له فرق الساعات ليطابق توقيت دولتك
+    return datetime.utcnow() + timedelta(hours=HOURS_DIFF)
+
+# --- دالة التجميل ---
 def style_data(df):
     if df.empty: return df
     df_view = df.copy()
@@ -61,33 +70,39 @@ def update_timeout_settings(minutes):
     save_data(df, SETTINGS_FILE)
     get_timeout_minutes_cached.clear()
 
-# --- التسجيل (تم تعديل هذه الدالة لحل مشكلة الاختفاء) ---
+# --- التسجيل (مع تصحيح الوقت) ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    if specific_time: log_time = specific_time
-    else: log_time = datetime.now()
     
-    # منع التكرار
+    # استخدام التوقيت المحلي المصحح
+    if specific_time:
+        log_time = specific_time
+    else:
+        log_time = get_local_time()
+    
+    # منع التكرار (خلال آخر دقيقة فقط)
     if not df.empty:
         last_entry = df[df["الاسم"] == user].tail(1)
-        if not last_entry.empty and last_entry.iloc[0]["نوع الحركة"] == action:
-             # إذا تكررت الضغطة، نعرض رسالة تنبيه بدلاً من النجاح
-             if not auto:
-                 st.session_state['msg_type'] = 'warning'
-                 st.session_state['msg_text'] = f"⚠️ أنت مسجل {action} بالفعل!"
-             return 
+        if not last_entry.empty:
+            last_action = last_entry.iloc[0]["نوع الحركة"]
+            last_time_str = last_entry.iloc[0]["الوقت"]
+            # إذا كانت نفس الحركة ونفس الدقيقة تقريباً، نمنع التكرار
+            if last_action == action and str(log_time.strftime("%H:%M")) in str(last_time_str):
+                 if not auto:
+                     st.session_state['msg_type'] = 'warning'
+                     st.session_state['msg_text'] = f"⚠️ لقد قمت بتسجيل {action} للتو!"
+                 return 
 
     new_row = {"الاسم": user, "نوع الحركة": action, "التاريخ": log_time.strftime("%Y-%m-%d"), "الوقت": log_time.strftime("%H:%M:%S")}
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     save_data(df, LOG_FILE)
     
-    # هنا الحل السحري: نحفظ الرسالة في الجلسة لنعرضها بعد إعادة التشغيل
     if auto:
         st.session_state['msg_type'] = 'warning'
-        st.session_state['msg_text'] = f"⚠️ تم تسجيل {action} تلقائياً"
+        st.session_state['msg_text'] = f"⚠️ خروج تلقائي ({log_time.strftime('%H:%M')})"
     else:
         st.session_state['msg_type'] = 'success'
-        st.session_state['msg_text'] = f"✅ تم تسجيل {action} بنجاح الساعة {log_time.strftime('%H:%M')}"
+        st.session_state['msg_text'] = f"✅ تم تسجيل {action} ({log_time.strftime('%H:%M')})"
 
 # --- الخروج التلقائي ---
 def check_inactivity():
@@ -96,7 +111,8 @@ def check_inactivity():
         current_status = st.session_state.get('current_status')
         if last_active:
             timeout = get_timeout_minutes_cached() * 60
-            if (datetime.now() - last_active).total_seconds() > timeout:
+            # استخدام التوقيت المحلي للمقارنة
+            if (get_local_time() - last_active).total_seconds() > timeout:
                 if current_status == "منزل":
                     user = st.session_state['username']
                     logout_time = last_active + timedelta(minutes=get_timeout_minutes_cached())
@@ -104,7 +120,7 @@ def check_inactivity():
                     st.session_state.update({'logged_in': False, 'username': '', 'current_status': None})
                     st.rerun()
 
-def update_activity(): st.session_state['last_active_time'] = datetime.now()
+def update_activity(): st.session_state['last_active_time'] = get_local_time()
 
 # --- الحسابات ---
 def calculate_daily_hours(df_logs):
@@ -160,20 +176,15 @@ def generate_pdf(dataframe, title="تقرير"):
 # --- Init ---
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
-if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': datetime.now(), 'current_status': None})
+if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': get_local_time(), 'current_status': None})
 check_inactivity()
 
-# --- دالة عرض الرسائل (جديد) ---
 def show_messages():
     if 'msg_text' in st.session_state and st.session_state['msg_text']:
         if st.session_state['msg_type'] == 'success':
-            st.success(st.session_state['msg_text'])
-            st.toast(st.session_state['msg_text'], icon="✅") # رسالة موبايل منبثقة
+            st.success(st.session_state['msg_text']); st.toast(st.session_state['msg_text'], icon="✅")
         else:
-            st.warning(st.session_state['msg_text'])
-            st.toast(st.session_state['msg_text'], icon="⚠️")
-        
-        # تفريغ الرسالة حتى لا تظهر مرة أخرى عند التحديث
+            st.warning(st.session_state['msg_text']); st.toast(st.session_state['msg_text'], icon="⚠️")
         st.session_state['msg_text'] = None
 
 # --- Pages ---
@@ -184,7 +195,7 @@ def login_page():
     if st.button("دخول"):
         match = users[(users['username'] == u) & (users['password'] == p)]
         if not match.empty:
-            st.session_state.update({'logged_in': True, 'username': u, 'is_admin': (u == "admin"), 'last_active_time': datetime.now()})
+            st.session_state.update({'logged_in': True, 'username': u, 'is_admin': (u == "admin"), 'last_active_time': get_local_time()})
             logs = load_data(LOG_FILE, ["الاسم", "نوع الحركة"])
             if not logs.empty:
                 last = logs[logs['الاسم'] == u].tail(1)
@@ -197,40 +208,33 @@ def login_page():
 def employee_view(username):
     update_activity()
     st.header(f"أهلاً {username}")
-    
-    # عرض الرسالة المحفوظة (إن وجدت)
     show_messages()
-    
     to = get_timeout_minutes_cached()
-    st.info(f"الحالة: {st.session_state['current_status'] if st.session_state['current_status'] else 'غير مسجل'} (خمول المنزل: {to}د)")
+    st.info(f"الحالة: {st.session_state['current_status'] if st.session_state['current_status'] else 'غير مسجل'}")
     
     place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
     c1, c2 = st.columns(2)
-    
-    # ملاحظة: نقوم بتحديث الحالة (session_state) قبل التسجيل لضمان الاستجابة السريعة
     if place == "مقر الشركة":
         if c1.button("🟢 دخول مقر", type="primary", use_container_width=True):
-            st.session_state['current_status'] = "مقر"
-            record_action(username, "دخول مقر")
-            st.rerun()
+            st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
         if c2.button("🔴 خروج مقر", use_container_width=True):
-            st.session_state['current_status'] = None
-            record_action(username, "خروج مقر")
-            st.rerun()
+            st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
     else:
         if c1.button("🟢 دخول منزلي", type="primary", use_container_width=True):
-            st.session_state['current_status'] = "منزل"
-            record_action(username, "دخول منزلي")
-            st.rerun()
+            st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
         if c2.button("🔴 خروج منزلي", use_container_width=True):
-            st.session_state['current_status'] = None
-            record_action(username, "خروج منزلي")
-            st.rerun()
+            st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
             
     st.divider()
+    st.caption("أحدث الحركات:")
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if not df.empty:
-        st.dataframe(style_data(df[df["الاسم"] == username].tail(3)), use_container_width=True)
+        # 1. فلترة على اسم المستخدم
+        user_logs = df[df["الاسم"] == username]
+        # 2. عكس الترتيب (الأحدث بالأعلى)
+        user_logs = user_logs.iloc[::-1]
+        # 3. عرض أول 5 صفوف فقط
+        st.dataframe(style_data(user_logs.head(5)), use_container_width=True)
 
 def admin_view():
     update_activity()
@@ -263,6 +267,9 @@ def admin_view():
                 emp_list_log = df_logs["الاسم"].unique()
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
+            
+            # عرض الأحدث في الأعلى للمدير أيضاً
+            df_logs = df_logs.iloc[::-1]
             st.dataframe(style_data(df_logs), use_container_width=True)
         else: st.info("السجل فارغ.")
 
@@ -280,7 +287,7 @@ def admin_view():
         with st.form("manual"):
             sel_u = st.selectbox("موظف", users['username'])
             act = st.selectbox("حركة", ["دخول مقر", "خروج مقر", "دخول منزلي", "خروج منزلي"])
-            d = st.date_input("تاريخ", datetime.now())
+            d = st.date_input("تاريخ", get_local_time())
             t = st.time_input("وقت (ثابت 9:00)", time(9,0))
             if st.form_submit_button("حفظ"):
                 row = {"الاسم": sel_u, "نوع الحركة": act, "التاريخ": d.strftime("%Y-%m-%d"), "الوقت": t.strftime("%H:%M:%S")}
