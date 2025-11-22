@@ -1,2 +1,5 @@
 streamlit
 pandas
+fpdf
+arabic-reshaper
+python-bidi
