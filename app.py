@@ -208,12 +208,14 @@ def employee_view(username):
     place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
     c1, c2 = st.columns(2)
     if place == "مقر الشركة":
-        if c1.button("🟢 دخول مقر", type="primary", use_container_width=True):
+        # تم إزالة type="primary" ليصبح الزر أبيض/حيادي
+        if c1.button("🟢 دخول مقر", use_container_width=True):
             st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
         if c2.button("🔴 خروج مقر", use_container_width=True):
             st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
     else:
-        if c1.button("🟢 دخول منزلي", type="primary", use_container_width=True):
+        # تم إزالة type="primary" ليصبح الزر أبيض/حيادي
+        if c1.button("🟢 دخول منزلي", use_container_width=True):
             st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
         if c2.button("🔴 خروج منزلي", use_container_width=True):
             st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
@@ -223,10 +225,7 @@ def employee_view(username):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if not df.empty:
         user_logs = df[df["الاسم"] == username]
-        user_logs = user_logs.iloc[::-1] # عكس الترتيب (الأحدث في الأعلى)
-        
-        # --- التعديل هنا: إزالة .head(5) ---
-        # الآن سيعرض الجدول بالكامل مهما كان العدد
+        user_logs = user_logs.iloc[::-1]
         st.dataframe(style_data(user_logs), use_container_width=True)
 
 def admin_view():
@@ -261,7 +260,7 @@ def admin_view():
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
             
-            df_logs = df_logs.iloc[::-1] # عرض الأحدث في الأعلى للمدير أيضاً
+            df_logs = df_logs.iloc[::-1]
             st.dataframe(style_data(df_logs), use_container_width=True)
         else: st.info("السجل فارغ.")
 
