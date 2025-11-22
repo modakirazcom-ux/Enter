@@ -33,22 +33,17 @@ def save_data(df, file_path):
     except OSError:
         st.error("خطأ مؤقت في السيرفر، انتظر لحظة.")
 
-# --- دالة التجميل (تعديل: ألوان فقط بدون أسهم) 🎨 ---
+# --- دالة التجميل (ألوان) ---
 def style_data(df):
     if df.empty: return df
     df_view = df.copy()
-    
     def add_color(val):
         val_str = str(val)
-        if "دخول" in val_str:
-            return f"🟢 {val_str}" # لون أخضر فقط
-        elif "خروج" in val_str:
-            return f"🔴 {val_str}" # لون أحمر فقط
+        if "دخول" in val_str: return f"🟢 {val_str}"
+        elif "خروج" in val_str: return f"🔴 {val_str}"
         return val_str
-
     if "نوع الحركة" in df_view.columns:
         df_view["نوع الحركة"] = df_view["نوع الحركة"].apply(add_color)
-        
     return df_view
 
 # --- إعدادات الخمول ---
@@ -66,22 +61,33 @@ def update_timeout_settings(minutes):
     save_data(df, SETTINGS_FILE)
     get_timeout_minutes_cached.clear()
 
-# --- التسجيل ---
+# --- التسجيل (تم تعديل هذه الدالة لحل مشكلة الاختفاء) ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if specific_time: log_time = specific_time
     else: log_time = datetime.now()
     
+    # منع التكرار
     if not df.empty:
         last_entry = df[df["الاسم"] == user].tail(1)
-        if not last_entry.empty and last_entry.iloc[0]["نوع الحركة"] == action: return 
+        if not last_entry.empty and last_entry.iloc[0]["نوع الحركة"] == action:
+             # إذا تكررت الضغطة، نعرض رسالة تنبيه بدلاً من النجاح
+             if not auto:
+                 st.session_state['msg_type'] = 'warning'
+                 st.session_state['msg_text'] = f"⚠️ أنت مسجل {action} بالفعل!"
+             return 
 
     new_row = {"الاسم": user, "نوع الحركة": action, "التاريخ": log_time.strftime("%Y-%m-%d"), "الوقت": log_time.strftime("%H:%M:%S")}
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     save_data(df, LOG_FILE)
     
-    if auto: st.warning(f"⚠️ تم تسجيل {action} تلقائياً ({log_time.strftime('%H:%M')})")
-    else: st.success(f"تم تسجيل {action}")
+    # هنا الحل السحري: نحفظ الرسالة في الجلسة لنعرضها بعد إعادة التشغيل
+    if auto:
+        st.session_state['msg_type'] = 'warning'
+        st.session_state['msg_text'] = f"⚠️ تم تسجيل {action} تلقائياً"
+    else:
+        st.session_state['msg_type'] = 'success'
+        st.session_state['msg_text'] = f"✅ تم تسجيل {action} بنجاح الساعة {log_time.strftime('%H:%M')}"
 
 # --- الخروج التلقائي ---
 def check_inactivity():
@@ -112,26 +118,22 @@ def calculate_daily_hours(df_logs):
         office_sec = 0; home_sec = 0
         records = group.to_dict('records')
         last_office = None; last_home = None
-
         for rec in records:
             act = rec['نوع الحركة']; ts = rec['DateTime']
             if pd.isna(ts): continue
-
             if "دخول مقر" in act: last_office = ts
             elif "خروج مقر" in act and last_office:
-                d = (ts - last_office).total_seconds()
+                d = (ts - last_office).total_seconds(); 
                 if d > 0: office_sec += d
                 last_office = None
             elif "دخول منزلي" in act: last_home = ts
             elif "خروج منزلي" in act and last_home:
-                d = (ts - last_home).total_seconds()
+                d = (ts - last_home).total_seconds(); 
                 if d > 0: home_sec += d
                 last_home = None
-        
         def fmt(s): return f"{int(s//3600):02d}:{int((s%3600)//60):02d}"
         total = office_sec + home_sec
-        if total > 0:
-            summary_data.append({"الاسم": name, "التاريخ": date, "ساعات المقر": fmt(office_sec), "ساعات المنزل": fmt(home_sec), "الإجمالي": fmt(total)})
+        if total > 0: summary_data.append({"الاسم": name, "التاريخ": date, "ساعات المقر": fmt(office_sec), "ساعات المنزل": fmt(home_sec), "الإجمالي": fmt(total)})
     return pd.DataFrame(summary_data)
 
 # --- PDF ---
@@ -155,13 +157,26 @@ def generate_pdf(dataframe, title="تقرير"):
         return bytes(pdf.output())
     except: return None
 
-# --- بدء التشغيل ---
+# --- Init ---
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
 if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': datetime.now(), 'current_status': None})
 check_inactivity()
 
-# --- الصفحات ---
+# --- دالة عرض الرسائل (جديد) ---
+def show_messages():
+    if 'msg_text' in st.session_state and st.session_state['msg_text']:
+        if st.session_state['msg_type'] == 'success':
+            st.success(st.session_state['msg_text'])
+            st.toast(st.session_state['msg_text'], icon="✅") # رسالة موبايل منبثقة
+        else:
+            st.warning(st.session_state['msg_text'])
+            st.toast(st.session_state['msg_text'], icon="⚠️")
+        
+        # تفريغ الرسالة حتى لا تظهر مرة أخرى عند التحديث
+        st.session_state['msg_text'] = None
+
+# --- Pages ---
 def login_page():
     st.title("🔒 تسجيل الدخول")
     users = load_data(USERS_FILE, ["username", "password"])
@@ -182,26 +197,39 @@ def login_page():
 def employee_view(username):
     update_activity()
     st.header(f"أهلاً {username}")
+    
+    # عرض الرسالة المحفوظة (إن وجدت)
+    show_messages()
+    
     to = get_timeout_minutes_cached()
     st.info(f"الحالة: {st.session_state['current_status'] if st.session_state['current_status'] else 'غير مسجل'} (خمول المنزل: {to}د)")
     
     place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
     c1, c2 = st.columns(2)
+    
+    # ملاحظة: نقوم بتحديث الحالة (session_state) قبل التسجيل لضمان الاستجابة السريعة
     if place == "مقر الشركة":
         if c1.button("🟢 دخول مقر", type="primary", use_container_width=True):
-            st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
+            st.session_state['current_status'] = "مقر"
+            record_action(username, "دخول مقر")
+            st.rerun()
         if c2.button("🔴 خروج مقر", use_container_width=True):
-            st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
+            st.session_state['current_status'] = None
+            record_action(username, "خروج مقر")
+            st.rerun()
     else:
         if c1.button("🟢 دخول منزلي", type="primary", use_container_width=True):
-            st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
+            st.session_state['current_status'] = "منزل"
+            record_action(username, "دخول منزلي")
+            st.rerun()
         if c2.button("🔴 خروج منزلي", use_container_width=True):
-            st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
+            st.session_state['current_status'] = None
+            record_action(username, "خروج منزلي")
+            st.rerun()
             
     st.divider()
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if not df.empty:
-        # استخدام دالة التجميل
         st.dataframe(style_data(df[df["الاسم"] == username].tail(3)), use_container_width=True)
 
 def admin_view():
@@ -213,20 +241,18 @@ def admin_view():
         if st.button("🔄 تحديث"): st.rerun()
         raw = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
         res = calculate_daily_hours(raw)
-        
         if not res.empty:
             filter_mode = st.radio("تصفية:", ["الجميع", "موظف محدد"], horizontal=True, key="h_filter")
             if filter_mode == "موظف محدد":
                 emp_list = res["الاسم"].unique()
                 sel_emp = st.selectbox("اختر الموظف:", emp_list, key="h_emp")
                 res = res[res["الاسم"] == sel_emp]
-
             st.dataframe(res, use_container_width=True)
             c1, c2 = st.columns(2)
             c1.download_button("Excel", res.to_csv(index=False).encode('utf-8'), "sum.csv")
             if c2.button("PDF"): 
                 pdf = generate_pdf(res, "ملخص الساعات"); 
-                if pdf: c2.download_button("تحميل PDF", pdf, "sum.pdf", "application/pdf")
+                if pdf: c2.download_button("PDF", pdf, "sum.pdf", "application/pdf")
         else: st.info("لا توجد بيانات.")
 
     with t2:
@@ -237,11 +263,8 @@ def admin_view():
                 emp_list_log = df_logs["الاسم"].unique()
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
-            
-            # استخدام دالة التجميل (ألوان بدون أسهم)
             st.dataframe(style_data(df_logs), use_container_width=True)
-        else:
-            st.info("السجل فارغ.")
+        else: st.info("السجل فارغ.")
 
     with t3:
         users = load_data(USERS_FILE, ["username", "password"])
