@@ -21,6 +21,23 @@ st.set_page_config(page_title="نظام الحضور", layout="centered")
 # تحديث كل 60 ثانية
 count = st_autorefresh(interval=60000, limit=None, key="fizzbuzzcounter")
 
+# --- CSS (أزرار بيضاء + تحسين صندوق الحالة) ---
+st.markdown("""
+<style>
+div.stButton > button {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    border: 1px solid #cccccc !important;
+    font-size: 16px !important;
+    padding: 10px !important;
+}
+div.stButton > button:hover {
+    background-color: #f9f9f9 !important;
+    border-color: #999999 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- دوال البيانات ---
 def load_data(file_path, columns):
     if os.path.exists(file_path):
@@ -202,19 +219,29 @@ def employee_view(username):
     update_activity()
     st.header(f"أهلاً {username}")
     show_messages()
-    to = get_timeout_minutes_cached()
-    st.info(f"الحالة: {st.session_state['current_status'] if st.session_state['current_status'] else 'غير مسجل'}")
+    
+    # --- عرض الحالة بشكل واضح ومميز ---
+    current_status = st.session_state['current_status']
+    timeout_mins = get_timeout_minutes_cached()
+    
+    if current_status == "منزل":
+        st.warning(f"🏠 **أنت تعمل من المنزل**\n\n⚠️ **المراقبة مفعلة:** سيتم تسجيل الخروج تلقائياً بعد {timeout_mins} دقائق من عدم استخدام التطبيق.")
+    elif current_status == "مقر":
+        st.success(f"🏢 **أنت في مقر الشركة**\n\n🔓 **العداد مفتوح:** لا يوجد تسجيل خروج تلقائي.")
+    else:
+        st.info("⚪ **أنت غير مسجل دخول حالياً**\n\nيرجى اختيار المكان وتسجيل الدخول لبدء الحساب.")
+    
+    st.markdown("---")
     
     place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
     c1, c2 = st.columns(2)
+    
     if place == "مقر الشركة":
-        # تم إزالة type="primary" ليصبح الزر أبيض/حيادي
         if c1.button("🟢 دخول مقر", use_container_width=True):
             st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
         if c2.button("🔴 خروج مقر", use_container_width=True):
             st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
     else:
-        # تم إزالة type="primary" ليصبح الزر أبيض/حيادي
         if c1.button("🟢 دخول منزلي", use_container_width=True):
             st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
         if c2.button("🔴 خروج منزلي", use_container_width=True):
