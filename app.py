@@ -6,6 +6,9 @@ from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
 from streamlit_autorefresh import st_autorefresh
+from gtts import gTTS
+import base64
+import requests
 
 # --- إعدادات المنطقة الزمنية ---
 HOURS_DIFF = 3 
@@ -15,6 +18,7 @@ LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
 SETTINGS_FILE = 'settings.csv'
 CHAT_FILE = 'chat_history.csv'
+ACTIVITY_FILE = 'user_activity.csv' # ملف جديد لتتبع نشاط كل موظف
 FONT_FILE = 'Amiri-Regular.ttf'
 
 # رابط صوت الجرس
@@ -62,6 +66,20 @@ def save_data(df, file_path):
         df.to_csv(file_path, index=False)
     except OSError:
         pass
+
+# --- دالة حفظ نشاط الموظف (للأدمن) ---
+def save_user_activity(username):
+    df = load_data(ACTIVITY_FILE, ["username", "last_seen"])
+    now_str = get_local_time().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # تحديث أو إضافة الموظف
+    if username in df['username'].values:
+        df.loc[df['username'] == username, 'last_seen'] = now_str
+    else:
+        new_row = {"username": username, "last_seen": now_str}
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    
+    save_data(df, ACTIVITY_FILE)
 
 # --- دوال الدردشة ---
 def send_message(sender, receiver, message):
@@ -141,6 +159,17 @@ def trigger_manual_alert(target_user):
     now_str = datetime.now().strftime("%Y%m%d%H%M%S")
     update_settings(alert_time=now_str, alert_target=target_user)
 
+def play_tts_alert(text):
+    try:
+        tts = gTTS(text=text, lang='ar')
+        tts.save("alert_temp.mp3")
+        with open("alert_temp.mp3", "rb") as f:
+            audio_bytes = f.read()
+        audio_base64 = base64.b64encode(audio_bytes).decode()
+        audio_html = f"""<audio autoplay><source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3"></audio>"""
+        st.markdown(audio_html, unsafe_allow_html=True)
+    except: pass
+
 # --- التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
@@ -185,7 +214,11 @@ def check_inactivity():
                     st.session_state.update({'logged_in': False, 'username': '', 'current_status': None})
                     st.rerun()
 
-def update_activity(): st.session_state['last_active_time'] = get_local_time()
+def update_activity(): 
+    st.session_state['last_active_time'] = get_local_time()
+    # حفظ النشاط في الملف ليراه المدير
+    if 'username' in st.session_state and st.session_state['username']:
+        save_user_activity(st.session_state['username'])
 
 # --- الحسابات ---
 def calculate_daily_hours(df_logs):
@@ -242,6 +275,7 @@ def generate_pdf(dataframe, title="تقرير"):
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5, 'manual_alert_time': '0', 'manual_alert_target': 'all'}]), SETTINGS_FILE)
 if not os.path.exists(CHAT_FILE): save_data(pd.DataFrame(columns=["sender", "receiver", "message", "date", "time", "read"]), CHAT_FILE)
+if not os.path.exists(ACTIVITY_FILE): save_data(pd.DataFrame(columns=["username", "last_seen"]), ACTIVITY_FILE)
 
 if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': get_local_time(), 'current_status': None})
 check_inactivity()
@@ -305,7 +339,7 @@ def login_page():
         else: st.error("خطأ")
 
 def employee_view(username):
-    update_activity()
+    update_activity() # هذا السطر يقوم بحفظ نشاط الموظف
     check_alerts_and_notify(username)
     st.header(f"أهلاً {username}")
     show_messages()
@@ -357,6 +391,58 @@ def employee_view(username):
 def admin_view():
     update_activity()
     st.header("🛠 الأدمن")
+    
+    # --- الشريط الجانبي: حالة الموظفين المحدثة ---
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("📊 حالة الموظفين (نشاط حي)")
+        
+        # تحميل البيانات
+        users_df = load_data(USERS_FILE, ["username"])
+        activity_df = load_data(ACTIVITY_FILE, ["username", "last_seen"])
+        logs_df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ"])
+        
+        employees = users_df[users_df['username'] != 'admin']['username'].tolist()
+        
+        now = get_local_time()
+        
+        for emp in employees:
+            status_icon = "🔴"
+            status_text = "أوف لاين"
+            
+            # 1. التحقق: هل آخر حركة له اليوم هي دخول؟
+            today_str = now.strftime("%Y-%m-%d")
+            emp_logs = logs_df[(logs_df['الاسم'] == emp) & (logs_df['التاريخ'] == today_str)]
+            
+            is_checked_in = False
+            if not emp_logs.empty:
+                last_action = emp_logs.iloc[-1]['نوع الحركة']
+                if "دخول" in last_action:
+                    is_checked_in = True
+            
+            if is_checked_in:
+                # 2. التحقق: هل هو نشط الآن (تحرك آخر 5 دقائق)؟
+                user_act = activity_df[activity_df['username'] == emp]
+                if not user_act.empty:
+                    last_seen_str = user_act.iloc[0]['last_seen']
+                    try:
+                        last_seen_time = datetime.strptime(last_seen_str, "%Y-%m-%d %H:%M:%S")
+                        # إذا كان نشطاً خلال آخر دقيقتين (بما أن التحديث كل 3 ثواني)
+                        if (now - last_seen_time).total_seconds() < 120:
+                            status_icon = "🟢"
+                            status_text = "أون لاين (نشط)"
+                        else:
+                            status_icon = "🟡"
+                            status_text = "خامل (بعيد)"
+                    except:
+                        status_icon = "🟡"
+                        status_text = "خامل"
+                else:
+                    status_icon = "🟡"
+                    status_text = "خامل"
+            
+            st.markdown(f"{status_icon} **{emp}**: {status_text}")
+
     t1, t2, t3, t4, t5, t6 = st.tabs(["⏱ الساعات", "📝 السجل", "👥 الموظفين", "🖐️ يدوي", "⚙️ إعدادات", "💬 الدردشة"])
     
     with t1:
