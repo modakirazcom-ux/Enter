@@ -3,3 +3,4 @@ pandas
 fpdf2
 arabic-reshaper
 python-bidi
+streamlit-autorefresh
