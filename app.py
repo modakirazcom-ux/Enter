@@ -17,12 +17,15 @@ SETTINGS_FILE = 'settings.csv'
 CHAT_FILE = 'chat_history.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
-st.set_page_config(page_title="نظام الحضور الفوري", layout="centered")
+# رابط صوت الجرس
+NOTIFICATION_SOUND_URL = "https://upload.wikimedia.org/wikipedia/commons/0/05/Beep-09.ogg"
 
-# ⚡⚡ التحديث كل 3000 ملي ثانية (3 ثواني) - الخيار المتوازن ⚡⚡
+st.set_page_config(page_title="نظام الحضور الذكي", layout="centered")
+
+# تحديث كل 3 ثواني
 count = st_autorefresh(interval=3000, limit=None, key="fizzbuzzcounter")
 
-# --- CSS لتحسين الشكل ---
+# --- CSS ---
 st.markdown("""
 <style>
 div.stButton > button {
@@ -58,9 +61,9 @@ def save_data(df, file_path):
     try:
         df.to_csv(file_path, index=False)
     except OSError:
-        pass # تجاهل أخطاء الانشغال اللحظي للحفاظ على السرعة
+        pass
 
-# --- دوال الدردشة الفورية ---
+# --- دوال الدردشة ---
 def send_message(sender, receiver, message):
     df = load_data(CHAT_FILE, ["sender", "receiver", "message", "date", "time", "read"])
     now = get_local_time()
@@ -107,20 +110,40 @@ def style_data(df):
         df_view["نوع الحركة"] = df_view["نوع الحركة"].apply(add_color)
     return df_view
 
-# --- إعدادات الخمول (مخزنة في الكاش للسرعة) ---
+# --- إعدادات الخمول والتنبيه اليدوي ---
 @st.cache_data
-def get_timeout_minutes_cached(_dummy_trigger=None):
+def get_settings_cached(_dummy_trigger=None):
     if os.path.exists(SETTINGS_FILE):
         try:
             df = pd.read_csv(SETTINGS_FILE)
-            return int(df.iloc[0]['timeout'])
-        except: return 5
-    return 5
+            # التأكد من وجود الأعمدة الجديدة
+            if 'manual_alert_time' not in df.columns: df['manual_alert_time'] = '0'
+            if 'manual_alert_target' not in df.columns: df['manual_alert_target'] = 'all'
+            return df.iloc[0]
+        except: return pd.Series({'timeout': 5, 'manual_alert_time': '0', 'manual_alert_target': 'all'})
+    return pd.Series({'timeout': 5, 'manual_alert_time': '0', 'manual_alert_target': 'all'})
 
-def update_timeout_settings(minutes):
-    df = pd.DataFrame([{'timeout': minutes}])
+def update_settings(timeout=None, alert_time=None, alert_target=None):
+    current = get_settings_cached()
+    
+    # الحفاظ على القيم القديمة إذا لم يتم تمرير قيمة جديدة
+    new_timeout = timeout if timeout is not None else current.get('timeout', 5)
+    new_alert_time = alert_time if alert_time is not None else current.get('manual_alert_time', '0')
+    new_alert_target = alert_target if alert_target is not None else current.get('manual_alert_target', 'all')
+    
+    df = pd.DataFrame([{
+        'timeout': new_timeout, 
+        'manual_alert_time': new_alert_time,
+        'manual_alert_target': new_alert_target
+    }])
     save_data(df, SETTINGS_FILE)
-    get_timeout_minutes_cached.clear()
+    get_settings_cached.clear()
+
+# دالة تشغيل الجرس (تم التعديل لتقبل الهدف)
+def trigger_manual_alert(target_user):
+    now_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    # نحفظ الوقت + اسم الموظف المستهدف
+    update_settings(alert_time=now_str, alert_target=target_user)
 
 # --- التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
@@ -156,11 +179,12 @@ def check_inactivity():
         last_active = st.session_state.get('last_active_time')
         current_status = st.session_state.get('current_status')
         if last_active:
-            timeout = get_timeout_minutes_cached() * 60
+            settings = get_settings_cached()
+            timeout = int(settings.get('timeout', 5)) * 60
             if (get_local_time() - last_active).total_seconds() > timeout:
                 if current_status == "منزل":
                     user = st.session_state['username']
-                    logout_time = last_active + timedelta(minutes=get_timeout_minutes_cached())
+                    logout_time = last_active + timedelta(minutes=int(settings.get('timeout', 5)))
                     record_action(user, "خروج منزلي", auto=True, specific_time=logout_time)
                     st.session_state.update({'logged_in': False, 'username': '', 'current_status': None})
                     st.rerun()
@@ -220,7 +244,7 @@ def generate_pdf(dataframe, title="تقرير"):
 
 # --- Init ---
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
-if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
+if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5, 'manual_alert_time': '0', 'manual_alert_target': 'all'}]), SETTINGS_FILE)
 if not os.path.exists(CHAT_FILE): save_data(pd.DataFrame(columns=["sender", "receiver", "message", "date", "time", "read"]), CHAT_FILE)
 
 if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': get_local_time(), 'current_status': None})
@@ -233,6 +257,51 @@ def show_messages():
         else:
             st.warning(st.session_state['msg_text']); st.toast(st.session_state['msg_text'], icon="⚠️")
         st.session_state['msg_text'] = None
+
+# --- دالة فحص التنبيهات (الذكية) ---
+def check_alerts_and_notify(username):
+    # 1. فحص الرسائل الجديدة
+    history = get_chat_history(username, "admin")
+    current_count = len(history)
+    
+    if 'last_msg_count' not in st.session_state:
+        st.session_state['last_msg_count'] = current_count
+    
+    should_play_sound = False
+    notification_text = ""
+
+    if current_count > st.session_state['last_msg_count']:
+        if not history.empty and history.iloc[-1]['sender'] == 'admin':
+            should_play_sound = True
+            notification_text = "📨 رسالة جديدة من الإدارة!"
+    st.session_state['last_msg_count'] = current_count
+
+    # 2. فحص التنبيه اليدوي (المحدد)
+    settings = get_settings_cached()
+    server_alert_time = str(settings.get('manual_alert_time', '0'))
+    server_alert_target = str(settings.get('manual_alert_target', 'all'))
+    
+    if 'last_manual_alert' not in st.session_state:
+        st.session_state['last_manual_alert'] = server_alert_time
+        
+    # إذا تغير وقت التنبيه في السيرفر عن آخر مرة
+    if server_alert_time != st.session_state['last_manual_alert']:
+        # تحقق: هل التنبيه للجميع؟ أم لي أنا تحديداً؟
+        if server_alert_target == 'all' or server_alert_target == username:
+            should_play_sound = True
+            notification_text = "🔔 تنبيه إداري عاجل!"
+        
+        st.session_state['last_manual_alert'] = server_alert_time
+
+    # تشغيل الصوت
+    if should_play_sound:
+        st.markdown(f"""
+            <audio autoplay>
+            <source src="{NOTIFICATION_SOUND_URL}" type="audio/ogg">
+            </audio>
+            """, unsafe_allow_html=True)
+        if notification_text:
+            st.toast(notification_text, icon="🔔")
 
 # --- Pages ---
 def login_page():
@@ -254,13 +323,16 @@ def login_page():
 
 def employee_view(username):
     update_activity()
+    check_alerts_and_notify(username)
+    
     st.header(f"أهلاً {username}")
     show_messages()
     
     tab1, tab2 = st.tabs(["🕒 الحضور والانصراف", "💬 الدردشة الفورية"])
     
     with tab1:
-        to = get_timeout_minutes_cached()
+        settings = get_settings_cached()
+        to = settings.get('timeout', 5)
         status = st.session_state['current_status']
         if status == "منزل":
             st.warning(f"🏠 عمل منزلي (مراقبة {to}د)")
@@ -311,6 +383,25 @@ def employee_view(username):
 def admin_view():
     update_activity()
     st.header("🛠 الأدمن")
+    
+    # --- الشريط الجانبي: التنبيهات اليدوية ---
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("🔔 التنبيه اليدوي")
+        
+        # قائمة الموظفين للتنبيه
+        users_df = load_data(USERS_FILE, ["username"])
+        # استثناء الأدمن
+        all_users = ["الجميع"] + users_df[users_df['username'] != 'admin']['username'].tolist()
+        
+        target_user_alert = st.selectbox("من تريد تنبيهه؟", all_users)
+        
+        if st.button("🔊 إرسال الجرس", use_container_width=True):
+            # نحول "الجميع" إلى "all" للكود
+            target_code = "all" if target_user_alert == "الجميع" else target_user_alert
+            trigger_manual_alert(target_code)
+            st.toast(f"تم إرسال الجرس لـ: {target_user_alert}", icon="📢")
+
     t1, t2, t3, t4, t5, t6 = st.tabs(["⏱ الساعات", "📝 السجل", "👥 الموظفين", "🖐️ يدوي", "⚙️ إعدادات", "💬 الدردشة"])
     
     with t1:
@@ -365,9 +456,10 @@ def admin_view():
 
     with t5:
         st.subheader("⚙️ إعدادات")
-        cur = get_timeout_minutes_cached()
-        new_t = st.number_input("دقائق خمول المنزل:", 1, 120, cur)
-        if st.button("حفظ"): update_timeout_settings(new_t); st.success("تم"); st.rerun()
+        current_settings = get_settings_cached()
+        cur_timeout = int(current_settings.get('timeout', 5))
+        new_t = st.number_input("دقائق خمول المنزل:", 1, 120, cur_timeout)
+        if st.button("حفظ"): update_settings(timeout=new_t); st.success("تم"); st.rerun()
 
     with t6:
         st.subheader("📨 البريد الوارد (فوري)")
