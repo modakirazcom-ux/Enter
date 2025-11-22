@@ -18,7 +18,7 @@ LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
 SETTINGS_FILE = 'settings.csv'
 CHAT_FILE = 'chat_history.csv'
-ACTIVITY_FILE = 'user_activity.csv' # ملف جديد لتتبع نشاط كل موظف
+ACTIVITY_FILE = 'user_activity.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
 # رابط صوت الجرس
@@ -67,17 +67,19 @@ def save_data(df, file_path):
     except OSError:
         pass
 
-# --- دالة حفظ نشاط الموظف (للأدمن) ---
+# --- دالة التوقيت المحلي ---
+def get_local_time():
+    return datetime.utcnow() + timedelta(hours=HOURS_DIFF)
+
+# --- دالة حفظ نشاط الموظف (تحديث النشاط) ---
 def save_user_activity(username):
     df = load_data(ACTIVITY_FILE, ["username", "last_seen"])
     now_str = get_local_time().strftime("%Y-%m-%d %H:%M:%S")
     
-    # تحديث أو إضافة الموظف
-    if username in df['username'].values:
-        df.loc[df['username'] == username, 'last_seen'] = now_str
-    else:
-        new_row = {"username": username, "last_seen": now_str}
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    # حذف السجل القديم للمستخدم (إن وجد) وإضافة الجديد
+    df = df[df['username'] != username]
+    new_row = pd.DataFrame([{"username": username, "last_seen": now_str}])
+    df = pd.concat([df, new_row], ignore_index=True)
     
     save_data(df, ACTIVITY_FILE)
 
@@ -110,10 +112,6 @@ def mark_as_read(user_reader, sender_user):
         if mask.any():
             df.loc[mask, 'read'] = "True"
             save_data(df, CHAT_FILE)
-
-# --- دالة التوقيت المحلي ---
-def get_local_time():
-    return datetime.utcnow() + timedelta(hours=HOURS_DIFF)
 
 # --- دالة التجميل ---
 def style_data(df):
@@ -216,9 +214,11 @@ def check_inactivity():
 
 def update_activity(): 
     st.session_state['last_active_time'] = get_local_time()
-    # حفظ النشاط في الملف ليراه المدير
-    if 'username' in st.session_state and st.session_state['username']:
-        save_user_activity(st.session_state['username'])
+    # 🚀 تحسين: حفظ النشاط فوراً
+    if st.session_state.get('logged_in') and not st.session_state.get('is_admin'):
+        username = st.session_state.get('username')
+        if username:
+            save_user_activity(username)
 
 # --- الحسابات ---
 def calculate_daily_hours(df_logs):
@@ -339,7 +339,7 @@ def login_page():
         else: st.error("خطأ")
 
 def employee_view(username):
-    update_activity() # هذا السطر يقوم بحفظ نشاط الموظف
+    update_activity()
     check_alerts_and_notify(username)
     st.header(f"أهلاً {username}")
     show_messages()
@@ -395,7 +395,7 @@ def admin_view():
     # --- الشريط الجانبي: حالة الموظفين المحدثة ---
     with st.sidebar:
         st.markdown("---")
-        st.subheader("📊 حالة الموظفين (نشاط حي)")
+        st.subheader("📊 حالة الموظفين (مباشر)")
         
         # تحميل البيانات
         users_df = load_data(USERS_FILE, ["username"])
@@ -405,41 +405,43 @@ def admin_view():
         employees = users_df[users_df['username'] != 'admin']['username'].tolist()
         
         now = get_local_time()
+        today_str = now.strftime("%Y-%m-%d")
         
         for emp in employees:
             status_icon = "🔴"
             status_text = "أوف لاين"
             
             # 1. التحقق: هل آخر حركة له اليوم هي دخول؟
-            today_str = now.strftime("%Y-%m-%d")
-            emp_logs = logs_df[(logs_df['الاسم'] == emp) & (logs_df['التاريخ'] == today_str)]
-            
             is_checked_in = False
-            if not emp_logs.empty:
-                last_action = emp_logs.iloc[-1]['نوع الحركة']
-                if "دخول" in last_action:
-                    is_checked_in = True
+            if not logs_df.empty:
+                emp_logs = logs_df[(logs_df['الاسم'] == emp) & (logs_df['التاريخ'] == today_str)]
+                if not emp_logs.empty:
+                    last_action = str(emp_logs.iloc[-1]['نوع الحركة'])
+                    if "دخول" in last_action:
+                        is_checked_in = True
             
             if is_checked_in:
-                # 2. التحقق: هل هو نشط الآن (تحرك آخر 5 دقائق)؟
-                user_act = activity_df[activity_df['username'] == emp]
-                if not user_act.empty:
-                    last_seen_str = user_act.iloc[0]['last_seen']
-                    try:
-                        last_seen_time = datetime.strptime(last_seen_str, "%Y-%m-%d %H:%M:%S")
-                        # إذا كان نشطاً خلال آخر دقيقتين (بما أن التحديث كل 3 ثواني)
-                        if (now - last_seen_time).total_seconds() < 120:
-                            status_icon = "🟢"
-                            status_text = "أون لاين (نشط)"
-                        else:
+                # 2. التحقق: هل هو نشط الآن؟
+                if not activity_df.empty:
+                    user_act = activity_df[activity_df['username'] == emp]
+                    if not user_act.empty:
+                        last_seen_str = user_act.iloc[0]['last_seen']
+                        try:
+                            last_seen_time = datetime.strptime(last_seen_str, "%Y-%m-%d %H:%M:%S")
+                            # إذا كان نشطاً خلال آخر 30 ثانية
+                            diff_seconds = (now - last_seen_time).total_seconds()
+                            if diff_seconds < 30: 
+                                status_icon = "🟢"
+                                status_text = "نشط الآن"
+                            elif diff_seconds < 300: # أقل من 5 دقائق
+                                status_icon = "🟡"
+                                status_text = "خامل"
+                            else:
+                                status_icon = "🟠"
+                                status_text = "خامل جداً"
+                        except:
                             status_icon = "🟡"
-                            status_text = "خامل (بعيد)"
-                    except:
-                        status_icon = "🟡"
-                        status_text = "خامل"
-                else:
-                    status_icon = "🟡"
-                    status_text = "خامل"
+                            status_text = "غير معروف"
             
             st.markdown(f"{status_icon} **{emp}**: {status_text}")
 
@@ -495,14 +497,11 @@ def admin_view():
                 row = {"الاسم": sel_u, "نوع الحركة": act, "التاريخ": d.strftime("%Y-%m-%d"), "الوقت": t.strftime("%H:%M:%S")}
                 save_data(pd.concat([load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"]), pd.DataFrame([row])], ignore_index=True), LOG_FILE); st.success("تم")
         
-        # --- تم نقل زر الجرس هنا ليكون ظاهراً ---
         st.divider()
         st.subheader("🔔 إرسال جرس تنبيه")
-        
         users_df = load_data(USERS_FILE, ["username"])
         all_users = ["الجميع"] + users_df[users_df['username'] != 'admin']['username'].tolist()
         target_user_alert = st.selectbox("من تريد تنبيهه؟", all_users)
-        
         if st.button("🔊 إرسال الجرس الآن", use_container_width=True):
             target_code = "all" if target_user_alert == "الجميع" else target_user_alert
             trigger_manual_alert(target_code)
