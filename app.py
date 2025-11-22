@@ -1,20 +1,19 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, time
 import os
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
-import io # مكتبة جديدة للتعامل مع الملفات
 
 # --- إعدادات الملفات ---
 LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
-st.set_page_config(page_title="نظام الحضور الذكي", layout="centered")
+st.set_page_config(page_title="نظام الحضور الشامل", layout="centered")
 
-# --- دوال البيانات ---
+# --- دوال التعامل مع البيانات ---
 
 def load_data(file_path, columns):
     if os.path.exists(file_path):
@@ -27,74 +26,105 @@ def load_data(file_path, columns):
 def save_data(df, file_path):
     df.to_csv(file_path, index=False)
 
-# --- دوال PDF المحدثة (fpdf2) ---
+# --- محرك حساب الساعات ---
+def calculate_daily_hours(df_logs):
+    if df_logs.empty:
+        return pd.DataFrame()
 
+    df_logs['DateTime'] = pd.to_datetime(df_logs['التاريخ'] + ' ' + df_logs['الوقت'])
+    df_logs = df_logs.sort_values(by=['الاسم', 'DateTime'])
+
+    summary_data = []
+    grouped = df_logs.groupby(['الاسم', 'التاريخ'])
+
+    for (name, date), group in grouped:
+        office_seconds = 0
+        home_seconds = 0
+        records = group.to_dict('records')
+        last_in_office = None
+        last_in_home = None
+
+        for record in records:
+            action = record['نوع الحركة']
+            time_stamp = record['DateTime']
+
+            if "دخول مقر" in action:
+                last_in_office = time_stamp
+            elif "خروج مقر" in action and last_in_office:
+                duration = (time_stamp - last_in_office).total_seconds()
+                office_seconds += duration
+                last_in_office = None
+
+            elif "دخول منزلي" in action:
+                last_in_home = time_stamp
+            elif "خروج منزلي" in action and last_in_home:
+                duration = (time_stamp - last_in_home).total_seconds()
+                home_seconds += duration
+                last_in_home = None
+
+        def format_duration(seconds):
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours:02d}:{minutes:02d}"
+
+        total_seconds = office_seconds + home_seconds
+        
+        summary_data.append({
+            "الاسم": name,
+            "التاريخ": date,
+            "ساعات المقر": format_duration(office_seconds),
+            "ساعات المنزل": format_duration(home_seconds),
+            "الإجمالي اليومي": format_duration(total_seconds)
+        })
+
+    return pd.DataFrame(summary_data)
+
+# --- دوال PDF ---
 def make_text_arabic(text):
-    if not isinstance(text, str):
-        text = str(text)
-    reshaped_text = arabic_reshaper.reshape(text)
-    bidi_text = get_display(reshaped_text)
-    return bidi_text
+    if not isinstance(text, str): text = str(text)
+    return get_display(arabic_reshaper.reshape(text))
 
-def generate_pdf(dataframe):
-    # التأكد من وجود الخط
+def generate_pdf(dataframe, title="تقرير"):
     if not os.path.exists(FONT_FILE):
-        st.error(f"ملف الخط {FONT_FILE} غير موجود! تأكد من رفعه لـ GitHub.")
+        st.error(f"ملف الخط {FONT_FILE} غير موجود!")
         return None
-
     try:
         pdf = FPDF()
         pdf.add_page()
-        
-        # إضافة الخط (الطريقة الجديدة في fpdf2)
         pdf.add_font("Amiri", style="", fname=FONT_FILE)
         pdf.set_font("Amiri", size=12)
-
-        # العنوان
-        pdf.set_font("Amiri", size=18)
-        pdf.cell(0, 10, make_text_arabic("تقرير الحضور والانصراف"), ln=True, align='C')
-        pdf.ln(10)
-
-        # إعداد الجدول
-        pdf.set_font("Amiri", size=12)
-        line_height = 10
-        col_width = 45
-
-        # العناوين
-        headers = dataframe.columns.tolist()
-        headers.reverse() # عكس الترتيب للعربية
         
+        pdf.set_font("Amiri", size=16)
+        pdf.cell(0, 10, make_text_arabic(title), ln=True, align='C')
+        pdf.ln(5)
+
+        pdf.set_font("Amiri", size=10)
+        line_height = 10
+        col_width = 35
+        
+        headers = dataframe.columns.tolist()[::-1]
         for header in headers:
             pdf.cell(col_width, line_height, make_text_arabic(header), border=1, align='C')
         pdf.ln(line_height)
 
-        # البيانات
-        for index, row in dataframe.iterrows():
-            row_data = row.tolist()
-            row_data.reverse()
+        for _, row in dataframe.iterrows():
+            row_data = row.tolist()[::-1]
             for item in row_data:
-                # تنظيف النص من أي مشاكل
-                text_item = str(item) if item is not None else "-"
-                pdf.cell(col_width, line_height, make_text_arabic(text_item), border=1, align='C')
+                pdf.cell(col_width, line_height, make_text_arabic(str(item)), border=1, align='C')
             pdf.ln(line_height)
-
-        # إخراج الملف كـ bytes (متوافق مع fpdf2)
+            
         return bytes(pdf.output())
-        
     except Exception as e:
-        st.error(f"حدث خطأ أثناء إنشاء PDF: {e}")
+        st.error(f"خطأ PDF: {e}")
         return None
 
-# --- إعداد النظام (كما كان سابقاً) ---
-
+# --- إعدادات البدء ---
 if not os.path.exists(USERS_FILE):
     default_users = pd.DataFrame([{"username": "admin", "password": "123"}])
     save_data(default_users, USERS_FILE)
 
 if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
-    st.session_state['username'] = ''
-    st.session_state['is_admin'] = False
+    st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False})
 
 # --- الصفحات ---
 
@@ -111,66 +141,111 @@ def login_page():
         else:
             st.error("بيانات خاطئة")
 
+def employee_view(username):
+    st.header(f"أهلاً بك، {username} 👋")
+    
+    st.subheader("📍 تحديد مكان العمل")
+    work_type = st.radio("أين تعمل الآن؟", ["مقر الشركة 🏢", "من المنزل 🏠"], horizontal=True)
+    
+    col1, col2 = st.columns(2)
+    
+    if work_type == "مقر الشركة 🏢":
+        in_label, out_label = "دخول مقر", "خروج مقر"
+        btn_color = "primary"
+    else:
+        in_label, out_label = "دخول منزلي", "خروج منزلي"
+        btn_color = "secondary"
+
+    with col1:
+        if st.button(f"🟢 تسجيل {in_label}", use_container_width=True, type=btn_color):
+            record_action(username, in_label)
+    with col2:
+        if st.button(f"🔴 تسجيل {out_label}", use_container_width=True):
+            record_action(username, out_label)
+
+    st.markdown("---")
+    st.caption("سجلك اليوم:")
+    df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
+    if not df.empty:
+        today = datetime.now().strftime("%Y-%m-%d")
+        st.dataframe(df[(df["الاسم"] == username) & (df["التاريخ"] == today)], use_container_width=True)
+
 def admin_view():
     st.header("🛠 لوحة المدير")
-    tab1, tab2 = st.tabs(["📊 التقارير", "👥 الموظفين"])
     
+    # أضفنا التبويب الرابع "تسجيل يدوي"
+    tab1, tab2, tab3, tab4 = st.tabs(["⏱ ساعات العمل", "📝 السجل الخام", "👥 الموظفين", "🖐️ تسجيل يدوي"])
+    
+    # 1. حساب الساعات
     with tab1:
-        df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-        
-        # زر التحديث اليدوي (لحل مشاكل تأخر البيانات)
-        if st.button("🔄 تحديث البيانات"):
-            st.rerun()
+        st.subheader("ملخص ساعات العمل")
+        df_raw = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
+        if st.button("🔄 تحديث"): st.rerun()
+        if not df_raw.empty:
+            df_sum = calculate_daily_hours(df_raw)
+            st.dataframe(df_sum, use_container_width=True)
+            c1, c2 = st.columns(2)
+            if not df_sum.empty:
+                c1.download_button("📥 Excel", df_sum.to_csv(index=False).encode('utf-8'), "summary.csv")
+                if c2.button("📄 PDF"):
+                    pdf = generate_pdf(df_sum, "ملخص الساعات")
+                    if pdf: c2.download_button("تحميل PDF", pdf, "summary.pdf", "application/pdf")
 
-        filter_opt = st.radio("عرض:", ["الكل", "موظف"], horizontal=True)
-        if filter_opt == "موظف" and not df.empty:
-            emp = st.selectbox("الموظف:", df["الاسم"].unique())
-            df = df[df["الاسم"] == emp]
-        
-        st.dataframe(df, use_container_width=True)
-        
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 تحميل Excel/CSV", csv, "report.csv", "text/csv", use_container_width=True)
-            
-        with col2:
-            # زر PDF المحسن
-            if st.button("📄 تجهيز PDF", use_container_width=True):
-                if not df.empty:
-                    pdf_data = generate_pdf(df)
-                    if pdf_data:
-                        st.download_button("تحميل ملف PDF الآن", pdf_data, "report.pdf", "application/pdf", use_container_width=True)
-                else:
-                    st.warning("لا توجد بيانات")
-
+    # 2. السجل الخام
     with tab2:
+        df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
+        st.dataframe(df, use_container_width=True)
+
+    # 3. الموظفين
+    with tab3:
         users_df = load_data(USERS_FILE, ["username", "password"])
-        st.dataframe(users_df, use_container_width=True)
-        
-        st.subheader("إضافة موظف جديد")
+        st.dataframe(users_df)
         c1, c2 = st.columns(2)
-        new_u = c1.text_input("الاسم")
-        new_p = c2.text_input("كلمة السر")
-        if st.button("إضافة"):
+        new_u, new_p = c1.text_input("اسم"), c2.text_input("سر")
+        if st.button("إضافة موظف"):
              if new_u and new_p:
                 new_row = pd.DataFrame([{"username": new_u, "password": new_p}])
                 users_df = pd.concat([users_df, new_row], ignore_index=True)
                 save_data(users_df, USERS_FILE)
-                st.success("تم!")
+                st.success("تم")
                 st.rerun()
 
-def employee_view(username):
-    st.header(f"أهلاً {username}")
-    c1, c2 = st.columns(2)
-    if c1.button("🟢 دخول", use_container_width=True): record_action(username, "دخول")
-    if c2.button("🔴 خروج", use_container_width=True): record_action(username, "خروج")
-    
-    df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    if not df.empty:
-        st.dataframe(df[df["الاسم"] == username], use_container_width=True)
+    # 4. تسجيل يدوي (الميزة الجديدة)
+    with tab4:
+        st.subheader("تصحيح أو إضافة سجل يدوياً")
+        st.info("استخدم هذه الشاشة إذا نسي الموظف تسجيل الدخول أو الخروج.")
+        
+        users_df = load_data(USERS_FILE, ["username", "password"])
+        users_list = users_df['username'].tolist()
+        
+        # نموذج الإدخال اليدوي
+        with st.form("manual_entry_form"):
+            col_a, col_b = st.columns(2)
+            selected_emp = col_a.selectbox("اختر الموظف", users_list)
+            action_type = col_b.selectbox("نوع الحركة", ["خروج مقر", "دخول مقر", "خروج منزلي", "دخول منزلي"])
+            
+            col_c, col_d = st.columns(2)
+            manual_date = col_c.date_input("التاريخ", datetime.now())
+            manual_time = col_d.time_input("الوقت المحدد", datetime.now().time())
+            
+            submitted = st.form_submit_button("➕ إضافة الحركة للنظام")
+            
+            if submitted:
+                # تنسيق البيانات كما في النظام
+                date_str = manual_date.strftime("%Y-%m-%d")
+                time_str = manual_time.strftime("%H:%M:%S")
+                
+                # إضافة السجل
+                df_log = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
+                new_record = {
+                    "الاسم": selected_emp,
+                    "نوع الحركة": action_type,
+                    "التاريخ": date_str,
+                    "الوقت": time_str
+                }
+                df_log = pd.concat([df_log, pd.DataFrame([new_record])], ignore_index=True)
+                save_data(df_log, LOG_FILE)
+                st.success(f"تم تسجيل {action_type} للموظف {selected_emp} بتاريخ {date_str} ووقت {time_str}")
 
 def record_action(user, action):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
@@ -178,7 +253,7 @@ def record_action(user, action):
     new_row = {"الاسم": user, "نوع الحركة": action, "التاريخ": now.strftime("%Y-%m-%d"), "الوقت": now.strftime("%H:%M:%S")}
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     save_data(df, LOG_FILE)
-    st.success("تم التسجيل!")
+    st.success(f"تم تسجيل {action}")
 
 # --- التشغيل ---
 if not st.session_state['logged_in']:
