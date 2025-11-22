@@ -181,3 +181,10 @@ if not st.session_state['logged_in']:
 else:
     with st.sidebar:
         st.write(f"👤 المستخدم: {st.session_state['username']}")
+        if st.button("تسجيل خروج"):
+            logout()
+    
+    if st.session_state['is_admin']:
+        admin_view()
+    else:
+        employee_view(st.session_state['username'])
