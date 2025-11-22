@@ -14,14 +14,15 @@ HOURS_DIFF = 3
 LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
 SETTINGS_FILE = 'settings.csv'
+CHAT_FILE = 'chat_history.csv' # ملف الدردشة الجديد
 FONT_FILE = 'Amiri-Regular.ttf'
 
-st.set_page_config(page_title="نظام الحضور", layout="centered")
+st.set_page_config(page_title="نظام الحضور والدردشة", layout="centered")
 
 # تحديث كل 60 ثانية
 count = st_autorefresh(interval=60000, limit=None, key="fizzbuzzcounter")
 
-# --- CSS (أزرار بيضاء + تحسين صندوق الحالة) ---
+# --- CSS (تصميم الأزرار والدردشة) ---
 st.markdown("""
 <style>
 div.stButton > button {
@@ -34,6 +35,12 @@ div.stButton > button {
 div.stButton > button:hover {
     background-color: #f9f9f9 !important;
     border-color: #999999 !important;
+}
+/* تحسين شكل فقاعات الدردشة */
+.stChatMessage {
+    background-color: #f0f2f6;
+    border-radius: 10px;
+    padding: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -52,6 +59,40 @@ def save_data(df, file_path):
         df.to_csv(file_path, index=False)
     except OSError:
         st.error("انتظر لحظة.. السيرفر مشغول")
+
+# --- دوال الدردشة (جديد) ---
+def send_message(sender, receiver, message):
+    df = load_data(CHAT_FILE, ["sender", "receiver", "message", "date", "time", "read"])
+    now = get_local_time()
+    new_msg = {
+        "sender": sender,
+        "receiver": receiver,
+        "message": message,
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+        "read": "False" # الرسالة غير مقروءة افتراضياً
+    }
+    df = pd.concat([df, pd.DataFrame([new_msg])], ignore_index=True)
+    save_data(df, CHAT_FILE)
+
+def get_chat_history(user1, user2):
+    df = load_data(CHAT_FILE, ["sender", "receiver", "message", "date", "time", "read"])
+    if df.empty: return pd.DataFrame()
+    
+    # جلب المحادثات بين الطرفين (سواء مرسل أو مستقبل)
+    mask = ((df['sender'] == user1) & (df['receiver'] == user2)) | \
+           ((df['sender'] == user2) & (df['receiver'] == user1))
+    
+    return df[mask]
+
+def mark_as_read(user_reader, sender_user):
+    # عندما يفتح المدير دردشة موظف، نحدد رسائل الموظف كمقروءة
+    df = load_data(CHAT_FILE, ["sender", "receiver", "message", "date", "time", "read"])
+    if not df.empty:
+        mask = (df['sender'] == sender_user) & (df['receiver'] == user_reader) & (df['read'] == "False")
+        if mask.any():
+            df.loc[mask, 'read'] = "True"
+            save_data(df, CHAT_FILE)
 
 # --- دالة التوقيت المحلي ---
 def get_local_time():
@@ -88,10 +129,8 @@ def update_timeout_settings(minutes):
 # --- التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    if specific_time:
-        log_time = specific_time
-    else:
-        log_time = get_local_time()
+    if specific_time: log_time = specific_time
+    else: log_time = get_local_time()
     
     if not df.empty:
         last_entry = df[df["الاسم"] == user].tail(1)
@@ -186,6 +225,9 @@ def generate_pdf(dataframe, title="تقرير"):
 # --- Init ---
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
+# إنشاء ملف الدردشة إن لم يكن موجوداً
+if not os.path.exists(CHAT_FILE): save_data(pd.DataFrame(columns=["sender", "receiver", "message", "date", "time", "read"]), CHAT_FILE)
+
 if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': get_local_time(), 'current_status': None})
 check_inactivity()
 
@@ -220,45 +262,61 @@ def employee_view(username):
     st.header(f"أهلاً {username}")
     show_messages()
     
-    # --- عرض الحالة بشكل واضح ومميز ---
-    current_status = st.session_state['current_status']
-    timeout_mins = get_timeout_minutes_cached()
+    # التبويبات: الحضور | الدردشة
+    tab1, tab2 = st.tabs(["🕒 الحضور والانصراف", "💬 مراسلة الإدارة"])
     
-    if current_status == "منزل":
-        st.warning(f"🏠 **أنت تعمل من المنزل**\n\n⚠️ **المراقبة مفعلة:** سيتم تسجيل الخروج تلقائياً بعد {timeout_mins} دقائق من عدم استخدام التطبيق.")
-    elif current_status == "مقر":
-        st.success(f"🏢 **أنت في مقر الشركة**\n\n🔓 **العداد مفتوح:** لا يوجد تسجيل خروج تلقائي.")
-    else:
-        st.info("⚪ **أنت غير مسجل دخول حالياً**\n\nيرجى اختيار المكان وتسجيل الدخول لبدء الحساب.")
-    
-    st.markdown("---")
-    
-    place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
-    c1, c2 = st.columns(2)
-    
-    if place == "مقر الشركة":
-        if c1.button("🟢 دخول مقر", use_container_width=True):
-            st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
-        if c2.button("🔴 خروج مقر", use_container_width=True):
-            st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
-    else:
-        if c1.button("🟢 دخول منزلي", use_container_width=True):
-            st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
-        if c2.button("🔴 خروج منزلي", use_container_width=True):
-            st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
-            
-    st.divider()
-    st.caption("سجل الحركات الكامل:")
-    df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    if not df.empty:
-        user_logs = df[df["الاسم"] == username]
-        user_logs = user_logs.iloc[::-1]
-        st.dataframe(style_data(user_logs), use_container_width=True)
+    with tab1:
+        to = get_timeout_minutes_cached()
+        st.info(f"الحالة: {st.session_state['current_status'] if st.session_state['current_status'] else 'غير مسجل'}")
+        
+        place = st.radio("المكان:", ["مقر الشركة", "المنزل"], horizontal=True)
+        c1, c2 = st.columns(2)
+        
+        if place == "مقر الشركة":
+            if c1.button("🟢 دخول مقر", use_container_width=True):
+                st.session_state['current_status'] = "مقر"; record_action(username, "دخول مقر"); st.rerun()
+            if c2.button("🔴 خروج مقر", use_container_width=True):
+                st.session_state['current_status'] = None; record_action(username, "خروج مقر"); st.rerun()
+        else:
+            if c1.button("🟢 دخول منزلي", use_container_width=True):
+                st.session_state['current_status'] = "منزل"; record_action(username, "دخول منزلي"); st.rerun()
+            if c2.button("🔴 خروج منزلي", use_container_width=True):
+                st.session_state['current_status'] = None; record_action(username, "خروج منزلي"); st.rerun()
+                
+        st.divider()
+        st.caption("سجل الحركات الكامل:")
+        df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
+        if not df.empty:
+            user_logs = df[df["الاسم"] == username]
+            user_logs = user_logs.iloc[::-1]
+            st.dataframe(style_data(user_logs), use_container_width=True)
+
+    with tab2:
+        st.subheader("تواصل مع الإدارة")
+        # عرض المحادثة
+        history = get_chat_history(username, "admin")
+        
+        # حاوية الرسائل (لجعلها قابلة للتمرير وتظهر بشكل جميل)
+        chat_container = st.container()
+        with chat_container:
+            if not history.empty:
+                for index, row in history.iterrows():
+                    role = "user" if row['sender'] == username else "assistant" # user للموظف, assistant للمدير
+                    with st.chat_message(role):
+                        st.write(row['message'])
+                        st.caption(f"{row['time']}")
+            else:
+                st.info("لا توجد رسائل سابقة. ابدأ المحادثة!")
+
+        # صندوق الإرسال
+        if prompt := st.chat_input("اكتب رسالتك هنا..."):
+            send_message(username, "admin", prompt)
+            st.rerun()
 
 def admin_view():
     update_activity()
     st.header("🛠 الأدمن")
-    t1, t2, t3, t4, t5 = st.tabs(["⏱ الساعات", "📝 السجل", "👥 الموظفين", "🖐️ يدوي", "⚙️"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["⏱ الساعات", "📝 السجل", "👥 الموظفين", "🖐️ يدوي", "⚙️ إعدادات", "💬 الدردشة"])
     
     with t1:
         if st.button("🔄 تحديث"): st.rerun()
@@ -286,7 +344,6 @@ def admin_view():
                 emp_list_log = df_logs["الاسم"].unique()
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
-            
             df_logs = df_logs.iloc[::-1]
             st.dataframe(style_data(df_logs), use_container_width=True)
         else: st.info("السجل فارغ.")
@@ -316,6 +373,52 @@ def admin_view():
         cur = get_timeout_minutes_cached()
         new_t = st.number_input("دقائق خمول المنزل:", 1, 120, cur)
         if st.button("حفظ"): update_timeout_settings(new_t); st.success("تم"); st.rerun()
+
+    # --- تبويب الدردشة الجديد ---
+    with t6:
+        st.subheader("📨 البريد الوارد")
+        
+        users_df = load_data(USERS_FILE, ["username"])
+        # استثناء الأدمن من القائمة
+        emp_list = users_df[users_df['username'] != 'admin']['username'].tolist()
+        
+        # التحقق من وجود رسائل غير مقروءة لوضع علامة مميزة
+        chat_df = load_data(CHAT_FILE, ["sender", "read"])
+        emp_display_list = []
+        for emp in emp_list:
+            has_unread = not chat_df[(chat_df['sender'] == emp) & (chat_df['read'] == "False")].empty
+            if has_unread:
+                emp_display_list.append(f"🔴 {emp}") # علامة حمراء لمن أرسل
+            else:
+                emp_display_list.append(emp)
+        
+        selected_emp_str = st.selectbox("اختر الموظف للمراسلة:", emp_display_list)
+        
+        # تنظيف الاسم من العلامة الحمراء
+        selected_emp = selected_emp_str.replace("🔴 ", "")
+        
+        if selected_emp:
+            # تحديد الرسائل كمقروءة بمجرد فتح المحادثة
+            mark_as_read("admin", selected_emp)
+            
+            history = get_chat_history("admin", selected_emp)
+            
+            # عرض المحادثة
+            chat_container_admin = st.container()
+            with chat_container_admin:
+                if not history.empty:
+                    for index, row in history.iterrows():
+                        role = "user" if row['sender'] == "admin" else "assistant" # user للمدير هنا
+                        with st.chat_message(role):
+                            st.write(row['message'])
+                            # عرض الوقت
+                            st.caption(f"{row['time']}")
+                else:
+                    st.info("لا توجد رسائل سابقة.")
+
+            if prompt := st.chat_input("الرد على الموظف..."):
+                send_message("admin", selected_emp, prompt)
+                st.rerun()
 
 if not st.session_state['logged_in']: login_page()
 else:
