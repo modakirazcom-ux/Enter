@@ -10,13 +10,13 @@ from streamlit_autorefresh import st_autorefresh
 # --- إعدادات الملفات ---
 LOG_FILE = 'attendance_log.csv'
 USERS_FILE = 'users.csv'
-SETTINGS_FILE = 'settings.csv' # ملف جديد لحفظ الإعدادات
+SETTINGS_FILE = 'settings.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
 st.set_page_config(page_title="نظام الحضور المرن", layout="centered")
 
-# تحديث تلقائي كل 30 ثانية (لا يؤثر على الأداء)
-count = st_autorefresh(interval=30000, limit=None, key="fizzbuzzcounter")
+# تعديل 1: التحديث كل 60 ثانية (60000 ملي ثانية) لتخفيف الضغط
+count = st_autorefresh(interval=60000, limit=None, key="fizzbuzzcounter")
 
 # --- دوال التعامل مع البيانات ---
 
@@ -29,11 +29,15 @@ def load_data(file_path, columns):
     return pd.DataFrame(columns=columns)
 
 def save_data(df, file_path):
-    df.to_csv(file_path, index=False)
+    try:
+        df.to_csv(file_path, index=False)
+    except OSError:
+        st.error("السيرفر مشغول، حاول مرة أخرى خلال ثوانٍ.")
 
-# --- دوال الإعدادات (جديد) ---
-def get_timeout_minutes():
-    # قراءة ملف الإعدادات، القيمة الافتراضية 5 دقائق
+# --- دوال الإعدادات (تحسين: استخدام الكاش) ---
+# تعديل 2: نستخدم cache_data لمنع فتح الملف بشكل متكرر
+@st.cache_data
+def get_timeout_minutes_cached(_dummy_trigger=None):
     if os.path.exists(SETTINGS_FILE):
         try:
             df = pd.read_csv(SETTINGS_FILE)
@@ -41,14 +45,13 @@ def get_timeout_minutes():
         except:
             return 5
     else:
-        # إنشاء الملف لأول مرة
-        df = pd.DataFrame([{'timeout': 5}])
-        save_data(df, SETTINGS_FILE)
         return 5
 
 def update_timeout_settings(minutes):
     df = pd.DataFrame([{'timeout': minutes}])
     save_data(df, SETTINGS_FILE)
+    # مسح الكاش عند التحديث ليأخذ القيمة الجديدة
+    get_timeout_minutes_cached.clear()
 
 # --- دالة التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
@@ -78,26 +81,22 @@ def record_action(user, action, auto=False, specific_time=None):
     else:
         st.success(f"تم تسجيل {action}")
 
-# --- منطق الخروج التلقائي المرن (Flexible Auto Logout) ---
+# --- منطق الخروج التلقائي المرن ---
 def check_inactivity():
     if st.session_state.get('logged_in') and not st.session_state.get('is_admin'):
         last_active = st.session_state.get('last_active_time')
         current_status = st.session_state.get('current_status')
         
         if last_active:
-            # 1. جلب القيمة التي حددها المدير من الملف
-            timeout_minutes = get_timeout_minutes()
+            # استخدام الدالة المحسنة
+            timeout_minutes = get_timeout_minutes_cached()
             timeout_seconds = timeout_minutes * 60
             
             time_diff = datetime.now() - last_active
             
-            # 2. المقارنة بناءً على إعدادات المدير
             if time_diff.total_seconds() > timeout_seconds:
-                
                 if current_status == "منزل":
                     user = st.session_state['username']
-                    
-                    # حساب وقت الخروج: آخر نشاط + المدة المسموحة
                     correct_logout_time = last_active + timedelta(minutes=timeout_minutes)
                     
                     record_action(user, "خروج منزلي", auto=True, specific_time=correct_logout_time)
@@ -180,6 +179,10 @@ def generate_pdf(dataframe, title="تقرير"):
 if not os.path.exists(USERS_FILE):
     save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 
+# التأكد من وجود ملف الإعدادات
+if not os.path.exists(SETTINGS_FILE):
+    save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
+
 if 'logged_in' not in st.session_state:
     st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': datetime.now(), 'current_status': None})
 
@@ -210,8 +213,7 @@ def employee_view(username):
     update_activity()
     st.header(f"أهلاً {username}")
     
-    # عرض قيمة الخمول الحالية للموظف ليكون على علم
-    current_timeout = get_timeout_minutes()
+    current_timeout = get_timeout_minutes_cached()
     
     status_msg = "غير مسجل دخول حالياً"
     if st.session_state['current_status'] == "مقر": status_msg = "🏢 أنت الآن: داخل المقر (العداد مفتوح)"
@@ -251,7 +253,6 @@ def admin_view():
     update_activity()
     st.header("🛠 الأدمن")
     
-    # أضفنا التبويب الخامس: الإعدادات
     t1, t2, t3, t4, t5 = st.tabs(["الساعات", "السجل", "الموظفين", "يدوي", "⚙️ الإعدادات"])
     
     with t1:
@@ -293,19 +294,17 @@ def admin_view():
                 save_data(pd.concat([logs, pd.DataFrame([row])], ignore_index=True), LOG_FILE)
                 st.success("تم")
 
-    # --- التبويب الجديد: الإعدادات ---
     with t5:
         st.subheader("⚙️ إعدادات النظام")
-        st.info("هنا يمكنك التحكم في مدة الخمول المسموحة للموظف المنزلي قبل تسجيل خروجه تلقائياً.")
+        st.info("مدة الخمول المسموحة للموظف المنزلي (دقائق).")
         
-        current_val = get_timeout_minutes()
+        current_val = get_timeout_minutes_cached()
         
-        # مربع إدخال رقمي
-        new_timeout = st.number_input("دقائق الخمول المسموحة (الدخول المنزلي):", min_value=1, max_value=120, value=current_val)
+        new_timeout = st.number_input("دقائق الخمول:", min_value=1, max_value=120, value=current_val)
         
         if st.button("💾 حفظ الإعدادات"):
             update_timeout_settings(new_timeout)
-            st.success(f"تم تحديث الوقت بنجاح إلى {new_timeout} دقائق.")
+            st.success(f"تم الحفظ: {new_timeout} دقائق.")
             st.rerun()
 
 if not st.session_state['logged_in']:
