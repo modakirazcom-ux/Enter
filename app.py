@@ -13,7 +13,7 @@ USERS_FILE = 'users.csv'
 SETTINGS_FILE = 'settings.csv'
 FONT_FILE = 'Amiri-Regular.ttf'
 
-st.set_page_config(page_title="نظام الحضور المطور", layout="centered")
+st.set_page_config(page_title="نظام الحضور المرئي", layout="centered")
 
 # تحديث كل 60 ثانية
 count = st_autorefresh(interval=60000, limit=None, key="fizzbuzzcounter")
@@ -31,8 +31,27 @@ def save_data(df, file_path):
     try:
         df.to_csv(file_path, index=False)
     except OSError:
-        st.error("خطأ مؤقت في السيرفر، حاول مجدداً.")
+        st.error("خطأ مؤقت في السيرفر، انتظر لحظة.")
 
+# --- دالة التجميل (تعديل: ألوان فقط بدون أسهم) 🎨 ---
+def style_data(df):
+    if df.empty: return df
+    df_view = df.copy()
+    
+    def add_color(val):
+        val_str = str(val)
+        if "دخول" in val_str:
+            return f"🟢 {val_str}" # لون أخضر فقط
+        elif "خروج" in val_str:
+            return f"🔴 {val_str}" # لون أحمر فقط
+        return val_str
+
+    if "نوع الحركة" in df_view.columns:
+        df_view["نوع الحركة"] = df_view["نوع الحركة"].apply(add_color)
+        
+    return df_view
+
+# --- إعدادات الخمول ---
 @st.cache_data
 def get_timeout_minutes_cached(_dummy_trigger=None):
     if os.path.exists(SETTINGS_FILE):
@@ -47,7 +66,7 @@ def update_timeout_settings(minutes):
     save_data(df, SETTINGS_FILE)
     get_timeout_minutes_cached.clear()
 
-# --- دالة التسجيل ---
+# --- التسجيل ---
 def record_action(user, action, auto=False, specific_time=None):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if specific_time: log_time = specific_time
@@ -81,7 +100,7 @@ def check_inactivity():
 
 def update_activity(): st.session_state['last_active_time'] = datetime.now()
 
-# --- حساب الساعات ---
+# --- الحسابات ---
 def calculate_daily_hours(df_logs):
     if df_logs.empty: return pd.DataFrame()
     df_logs['DateTime'] = pd.to_datetime(df_logs['التاريخ'] + ' ' + df_logs['الوقت'], errors='coerce')
@@ -136,13 +155,13 @@ def generate_pdf(dataframe, title="تقرير"):
         return bytes(pdf.output())
     except: return None
 
-# --- Init ---
+# --- بدء التشغيل ---
 if not os.path.exists(USERS_FILE): save_data(pd.DataFrame([{"username": "admin", "password": "123"}]), USERS_FILE)
 if not os.path.exists(SETTINGS_FILE): save_data(pd.DataFrame([{'timeout': 5}]), SETTINGS_FILE)
 if 'logged_in' not in st.session_state: st.session_state.update({'logged_in': False, 'username': '', 'is_admin': False, 'last_active_time': datetime.now(), 'current_status': None})
 check_inactivity()
 
-# --- Pages ---
+# --- الصفحات ---
 def login_page():
     st.title("🔒 تسجيل الدخول")
     users = load_data(USERS_FILE, ["username", "password"])
@@ -181,22 +200,22 @@ def employee_view(username):
             
     st.divider()
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-    if not df.empty: st.dataframe(df[df["الاسم"] == username].tail(3), use_container_width=True)
+    if not df.empty:
+        # استخدام دالة التجميل
+        st.dataframe(style_data(df[df["الاسم"] == username].tail(3)), use_container_width=True)
 
 def admin_view():
     update_activity()
     st.header("🛠 الأدمن")
     t1, t2, t3, t4, t5 = st.tabs(["⏱ الساعات", "📝 السجل", "👥 الموظفين", "🖐️ يدوي", "⚙️"])
     
-    # --- 1. تبويب الساعات (تم إضافة الفلتر) ---
     with t1:
         if st.button("🔄 تحديث"): st.rerun()
         raw = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
         res = calculate_daily_hours(raw)
         
         if not res.empty:
-            # خيارات الفلترة
-            filter_mode = st.radio("تصفية حسب:", ["الجميع", "موظف محدد"], horizontal=True, key="h_filter")
+            filter_mode = st.radio("تصفية:", ["الجميع", "موظف محدد"], horizontal=True, key="h_filter")
             if filter_mode == "موظف محدد":
                 emp_list = res["الاسم"].unique()
                 sel_emp = st.selectbox("اختر الموظف:", emp_list, key="h_emp")
@@ -210,18 +229,17 @@ def admin_view():
                 if pdf: c2.download_button("تحميل PDF", pdf, "sum.pdf", "application/pdf")
         else: st.info("لا توجد بيانات.")
 
-    # --- 2. تبويب السجل الخام (تم إضافة الفلتر) ---
     with t2:
         df_logs = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
         if not df_logs.empty:
-            # خيارات الفلترة
-            filter_mode_log = st.radio("عرض السجلات لـ:", ["الجميع", "موظف محدد"], horizontal=True, key="l_filter")
+            filter_mode_log = st.radio("عرض:", ["الجميع", "موظف محدد"], horizontal=True, key="l_filter")
             if filter_mode_log == "موظف محدد":
                 emp_list_log = df_logs["الاسم"].unique()
                 sel_emp_log = st.selectbox("اختر الموظف:", emp_list_log, key="l_emp")
                 df_logs = df_logs[df_logs["الاسم"] == sel_emp_log]
             
-            st.dataframe(df_logs, use_container_width=True)
+            # استخدام دالة التجميل (ألوان بدون أسهم)
+            st.dataframe(style_data(df_logs), use_container_width=True)
         else:
             st.info("السجل فارغ.")
 
