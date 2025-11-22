@@ -26,15 +26,15 @@ def load_data(file_path, columns):
 def save_data(df, file_path):
     df.to_csv(file_path, index=False)
 
-# --- محرك حساب الساعات (تم تحسينه ليدمج اليدوي مع التلقائي) ---
+# --- محرك حساب الساعات ---
 def calculate_daily_hours(df_logs):
     if df_logs.empty:
         return pd.DataFrame()
 
-    # دمج التاريخ والوقت في عمود واحد للمعالجة
+    # دمج التاريخ والوقت
     df_logs['DateTime'] = pd.to_datetime(df_logs['التاريخ'] + ' ' + df_logs['الوقت'], errors='coerce')
     
-    # خطوة مهمة: ترتيب السجلات زمنياً لضمان دقة الحساب بعد الإضافة اليدوية
+    # ترتيب السجلات زمنياً بدقة
     df_logs = df_logs.sort_values(by=['الاسم', 'DateTime'])
 
     summary_data = []
@@ -52,16 +52,14 @@ def calculate_daily_hours(df_logs):
             action = record['نوع الحركة']
             time_stamp = record['DateTime']
             
-            if pd.isna(time_stamp): continue # تخطي أي سجل تالف
+            if pd.isna(time_stamp): continue
 
             # منطق المقر
             if "دخول مقر" in action:
                 last_in_office = time_stamp
             elif "خروج مقر" in action and last_in_office:
                 duration = (time_stamp - last_in_office).total_seconds()
-                # نتجاهل الحالات السالبة (لو أدخل المدير وقتاً قبل الدخول بالخطأ)
-                if duration > 0:
-                    office_seconds += duration
+                if duration > 0: office_seconds += duration
                 last_in_office = None
 
             # منطق المنزل
@@ -69,8 +67,7 @@ def calculate_daily_hours(df_logs):
                 last_in_home = time_stamp
             elif "خروج منزلي" in action and last_in_home:
                 duration = (time_stamp - last_in_home).total_seconds()
-                if duration > 0:
-                    home_seconds += duration
+                if duration > 0: home_seconds += duration
                 last_in_home = None
 
         def format_duration(seconds):
@@ -80,7 +77,6 @@ def calculate_daily_hours(df_logs):
 
         total_seconds = office_seconds + home_seconds
         
-        # لا نعرض الأيام التي ليس فيها ساعات (أصفار) لتقليل الزحمة
         if total_seconds > 0:
             summary_data.append({
                 "الاسم": name,
@@ -181,7 +177,6 @@ def employee_view(username):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
     if not df.empty:
         today = datetime.now().strftime("%Y-%m-%d")
-        # نعرض آخر 5 حركات فقط لعدم إطالة الصفحة
         my_logs = df[(df["الاسم"] == username) & (df["التاريخ"] == today)]
         st.dataframe(my_logs.tail(5), use_container_width=True)
 
@@ -206,13 +201,12 @@ def admin_view():
                     pdf = generate_pdf(df_sum, "ملخص الساعات")
                     if pdf: c2.download_button("تحميل PDF", pdf, "summary.pdf", "application/pdf")
             else:
-                st.info("لا توجد ساعات عمل مكتملة (دخول + خروج) لعرضها.")
+                st.info("لا توجد ساعات مكتملة (دخول + خروج).")
         else:
             st.warning("لا توجد بيانات.")
 
     # 2. السجل الخام
     with tab2:
-        st.info("هنا تظهر كل الحركات كما تم تسجيلها بالضبط")
         df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
         st.dataframe(df, use_container_width=True)
 
@@ -230,46 +224,44 @@ def admin_view():
                 st.success("تم")
                 st.rerun()
 
-    # 4. تسجيل يدوي (تم الإصلاح هنا)
+    # 4. تسجيل يدوي (تم الإصلاح النهائي)
     with tab4:
         st.subheader("إضافة حركة يدوية")
-        st.warning("⚠️ تنبيه: استخدم هذا الخيار لإضافة دخول أو خروج نسيه الموظف.")
+        st.info("حدد الوقت يدوياً. الوقت الافتراضي هو 09:00 للتأكد من أنك اخترت الوقت الصحيح.")
         
         users_df = load_data(USERS_FILE, ["username", "password"])
         users_list = users_df['username'].tolist()
         
+        # استخدام Form يمنع التحديث التلقائي للقيم
         with st.form("manual_entry_form"):
             col_a, col_b = st.columns(2)
             selected_emp = col_a.selectbox("اختر الموظف", users_list)
-            action_type = col_b.selectbox("نوع الحركة", ["دخول مقر", "خروج مقر", "دخول منزلي", "خروج منزلي"])
+            action_type = col_b.selectbox("نوع الحركة", ["خروج مقر", "دخول مقر", "خروج منزلي", "دخول منزلي"])
             
             col_c, col_d = st.columns(2)
             manual_date = col_c.date_input("التاريخ", datetime.now())
-            manual_time = col_d.time_input("الوقت (بالدقيقة)", datetime.now().time())
             
-            submitted = st.form_submit_button("➕ حفظ الحركة بالنظام")
+            # ⚠️ التغيير هنا: وقت ثابت (9 صباحاً) وليس الوقت الحالي، لإجبارك على تغييره
+            fixed_time = time(9, 0) 
+            manual_time = col_d.time_input("الوقت المحدد", value=fixed_time)
+            
+            submitted = st.form_submit_button("➕ حفظ الحركة")
             
             if submitted:
-                # هنا الإصلاح: نأخذ القيم اليدوية بدلاً من الوقت الحالي
                 date_str = manual_date.strftime("%Y-%m-%d")
-                time_str = manual_time.strftime("%H:%M:%S")
+                time_str = manual_time.strftime("%H:%M:%S") # يأخذ الوقت من الصندوق حصراً
                 
                 df_log = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
-                
-                # تجهيز السجل
                 new_record = {
                     "الاسم": selected_emp,
                     "نوع الحركة": action_type,
                     "التاريخ": date_str,
                     "الوقت": time_str
                 }
-                
                 df_log = pd.concat([df_log, pd.DataFrame([new_record])], ignore_index=True)
                 save_data(df_log, LOG_FILE)
                 
-                st.success(f"تم الحفظ: {selected_emp} - {action_type} - {time_str}")
-                # نقوم بإعادة تشغيل الصفحة لتظهر النتائج فوراً في الحسابات
-                # st.rerun() # (ملاحظة: rerunning داخل form أحياناً يسبب مشاكل، لذا نكتفي بالرسالة)
+                st.success(f"✅ تم الحفظ بنجاح: {selected_emp} | {action_type} | الساعة {time_str}")
 
 def record_action(user, action):
     df = load_data(LOG_FILE, ["الاسم", "نوع الحركة", "التاريخ", "الوقت"])
